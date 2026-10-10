@@ -52,6 +52,11 @@ def load_config(path):
 def analyze(config, stack):
     source, target = Path(config['source']), Path(config['target'])
     profiles = [check_profile(source), check_profile(target)]
+    inputs = {'map': config['map'], 'otb': config['otb'],
+              'source_dat': source / 'Tibia.dat', 'source_spr': source / 'Tibia.spr',
+              'target_dat': target / 'Tibia.dat', 'target_spr': target / 'Tibia.spr',
+              'source_otfi': profiles[0], 'target_otfi': profiles[1]}
+    input_snapshot = {key: dict(path=str(path), sha256=sha256(path)) for key, path in inputs.items()}
     counts, map_info = read_map(config['map'])
     mappings, flags, otb_version = read_otb(config['otb'])
     source_dat, target_dat = Dat(source / 'Tibia.dat'), Dat(target / 'Tibia.dat')
@@ -96,18 +101,18 @@ def analyze(config, stack):
                 if cid not in selected[category]:
                     for sprite in record.sprites():
                         target_spr.blob(sprite)
-    inputs = {'map': config['map'], 'otb': config['otb'],
-              'source_dat': source / 'Tibia.dat', 'source_spr': source / 'Tibia.spr',
-              'target_dat': target / 'Tibia.dat', 'target_spr': target / 'Tibia.spr',
-              'source_otfi': profiles[0], 'target_otfi': profiles[1]}
     report = dict(schema_version=1, config=config, map=map_info, otb_version=otb_version,
                   source_counts=dict(zip(CATEGORIES, source_dat.counts)),
                   target_counts=dict(zip(CATEGORIES, target_dat.counts)),
                   summary=dict(server_ids=len(counts), client_ids=len({r['client_id'] for r in rows if r['source_sha256']}),
                                statuses=dict(Counter(row['status'] for row in rows)),
+                               unique_client_statuses=dict(Counter(value[0] for value in cached.values())),
                                source_sprites=source_spr.count, target_sprites=target_spr.count),
                   selected={c: sorted(ids) for c, ids in selected.items()},
-                  inputs={key: dict(path=str(path), sha256=sha256(path)) for key, path in inputs.items()},
+                  selected_source_sprites=sorted({sid for category, ids in selected.items()
+                                                 for cid in ids if cid in source_dat.records[category]
+                                                 for sid in source_dat.records[category][cid].sprites() if sid}),
+                  inputs=input_snapshot,
                   errors=errors, items=rows,
                   limitations=['Only static map dependencies and explicit extra selections are audited.',
                                'The source items.otb preserves map server-to-client IDs. Server items.xml, scripts, transforms and destination-only OTB mappings require separate integration.',
@@ -225,6 +230,7 @@ def run(config, output, build=False):
                     if result_otb.get(row['server_id']) != row['client_id']:
                         raise FormatError('Output OTB mapping changed')
                 report['outputs'] = {p.name: dict(bytes=p.stat().st_size, sha256=sha256(p)) for p in stage.iterdir() if p.is_file()}
+                (stage / 'sprite-mapping.json').write_text(json.dumps(maps, indent=2), encoding='utf-8')
                 report['validation']['map_ids_preserved'] = True
                 report['validation']['all_record_fingerprints_match'] = True
             # Reject inputs edited while the potentially long build/audit was running.

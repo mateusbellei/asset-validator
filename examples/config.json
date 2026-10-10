@@ -1,0 +1,13 @@
+{
+  "map": "map/MAPA1.otbm",
+  "otb": "source/items.otb",
+  "source": "source",
+  "target": "target",
+  "mode": "merge",
+  "extra": {
+    "items": [],
+    "outfits": [],
+    "effects": [],
+    "missiles": []
+  }
+}

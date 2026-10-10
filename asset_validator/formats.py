@@ -95,7 +95,7 @@ def tree_nodes(path):
                 raise FormatError('Truncated tree or trailing bytes')
 
 
-def read_otb(path):
+def read_otb(path, allow_empty=False):
     mappings, flags, version = {}, {}, None
     for kind, depth, props in tree_nodes(path):
         r = Reader(props)
@@ -125,12 +125,12 @@ def read_otb(path):
         if sid in mappings:
             raise FormatError(f'Duplicate OTB server ID {sid}')
         mappings[sid], flags[sid] = cid, value
-    if not mappings:
+    if not mappings and not allow_empty:
         raise FormatError('Empty OTB')
     return mappings, flags, version
 
 
-def read_map(path):
+def read_map(path, item_flags=None):
     from collections import Counter
     counts, tiles, root, map_data = Counter(), 0, None, False
     parents = {}
@@ -141,7 +141,7 @@ def read_map(path):
             if kind not in (0, 1) or len(props) != 16:
                 raise FormatError('Unsupported map root')
             version = r.u32()
-            if version not in (1, 2, 3):
+            if version not in (0, 1, 2, 3):
                 raise FormatError(f'Unsupported OTBM version {version}')
             root = dict(version=version, width=r.u16(), height=r.u16(),
                         otb_major=r.u32(), otb_minor=r.u32())
@@ -157,7 +157,13 @@ def read_map(path):
                 if attr == 3:
                     r.take(4)
                 elif attr == 9:
-                    counts[r.u16()] += 1
+                    sid = r.u16()
+                    counts[sid] += 1
+                    if root['version'] == 0:
+                        if item_flags is None or sid not in item_flags:
+                            raise FormatError(f'OTBM v0 needs OTB flags for compact item {sid}')
+                        if item_flags[sid] & (1 << 7):
+                            r.u8()  # legacy compact stack count
                 else:
                     raise FormatError(f'Unsupported tile attribute {attr}')
         elif kind == 6:
@@ -174,29 +180,53 @@ def read_map(path):
 CATEGORIES = ('items', 'outfits', 'effects', 'missiles')
 
 
+@dataclass(frozen=True)
+class Profile:
+    version: int = 1098
+    extended: bool = True
+    transparency: bool = True
+    durations: bool = True
+    groups: bool = True
+    size: int = 32
+
+    @property
+    def index_bytes(self):
+        return 4 if self.extended else 2
+
+    @property
+    def color_bytes(self):
+        return 4 if self.transparency else 3
+
+    @property
+    def modern_flags(self):
+        return self.version >= 1010
+
+
 @dataclass
 class Record:
     raw: bytes
     offsets: tuple
+    index_bytes: int = 4
 
     def sprites(self):
-        return tuple(struct.unpack_from('<I', self.raw, p)[0] for p in self.offsets)
+        return tuple(struct.unpack_from('<I' if self.index_bytes == 4 else '<H', self.raw, p)[0] for p in self.offsets)
 
     def rewrite(self, mapping):
         raw = bytearray(self.raw)
         for offset, sid in zip(self.offsets, self.sprites()):
-            struct.pack_into('<I', raw, offset, mapping[sid])
+            struct.pack_into('<I' if self.index_bytes == 4 else '<H', raw, offset, mapping[sid])
         return bytes(raw)
 
     def metadata(self):
         raw = bytearray(self.raw)
         for offset in self.offsets:
-            raw[offset:offset + 4] = b'\0' * 4
+            raw[offset:offset + self.index_bytes] = b'\0' * self.index_bytes
         return bytes(raw)
 
 
 class Dat:
-    def __init__(self, path):
+    def __init__(self, path, profile=None):
+        self.profile = profile or Profile()
         self.path = Path(path)
         r = Reader(self.path.read_bytes())
         self.signature = r.u32()
@@ -209,10 +239,16 @@ class Dat:
             for cid in range(100 if category == 'items' else 1, count + 1):
                 try:
                     start, offsets = r.pos, []
+                    attributes = set()
                     while True:
                         attr = r.u8()
                         if attr == 255:
                             break
+                        if attr in attributes:
+                            raise FormatError(f'Duplicate DAT attribute {attr}')
+                        attributes.add(attr)
+                        if not self.profile.modern_flags and attr >= 16:
+                            attr += 1
                         if attr in (0, 8, 9, 26, 29, 30, 33, 35):
                             r.take(2)
                         elif attr in (22, 25):
@@ -221,13 +257,14 @@ class Dat:
                             r.take(6)
                             r.take(r.u16())
                             r.take(4)
-                        elif attr not in (*range(39), 254):
+                        elif attr not in range(39) and not (self.profile.modern_flags and attr == 254):
                             raise FormatError(f'Unknown DAT attribute {attr}')
-                    groups = r.u8() if category == 'outfits' else 1
+                    has_groups = self.profile.groups and category == 'outfits'
+                    groups = r.u8() if has_groups else 1
                     if groups not in (1, 2):
                         raise FormatError(f'Invalid frame group count {groups}')
                     for _ in range(groups):
-                        if category == 'outfits':
+                        if has_groups:
                             if r.u8() not in (0, 1):
                                 raise FormatError('Invalid frame group type')
                         width, height = r.u8(), r.u8()
@@ -238,11 +275,20 @@ class Dat:
                         if not total or total > 1048576:
                             raise FormatError(f'Invalid dimensions {dimensions}')
                         phases = dimensions[-1]
-                        if phases > 1:
-                            r.take(6 + phases * 8)
-                        offsets.extend(range(r.pos - start, r.pos - start + total * 4, 4))
-                        r.take(total * 4)
-                    records[cid] = Record(r.data[start:r.pos], tuple(offsets))
+                        if phases > 1 and self.profile.durations:
+                            mode = r.u8()
+                            loops = r.number('i')
+                            first = r.number('b')
+                            if mode not in (0, 1) or loops < -1 or first < -1 or first >= phases:
+                                raise FormatError('Invalid animation parameters')
+                            for _ in range(phases):
+                                minimum, maximum = r.u32(), r.u32()
+                                if minimum > maximum:
+                                    raise FormatError('Invalid animation duration range')
+                        index_bytes = self.profile.index_bytes
+                        offsets.extend(range(r.pos - start, r.pos - start + total * index_bytes, index_bytes))
+                        r.take(total * index_bytes)
+                    records[cid] = Record(r.data[start:r.pos], tuple(offsets), index_bytes)
                 except FormatError as error:
                     raise FormatError(f'{self.path}: {category} ID {cid}: {error}') from error
         r.end()
@@ -260,14 +306,17 @@ EMPTY_ITEM = b'\xff' + b'\x01' * 7 + b'\0' * 4
 
 
 class Spr:
-    def __init__(self, path):
+    def __init__(self, path, profile=None):
+        self.profile = profile or Profile()
         self.path = Path(path)
         self.file = self.path.open('rb')
         try:
             self.data = mmap.mmap(self.file.fileno(), 0, access=mmap.ACCESS_READ)
             r = Reader(self.data)
-            self.signature, self.count = r.u32(), r.u32()
-            if self.count > (len(self.data) - 8) // 4:
+            self.signature = r.u32()
+            self.count = r.u32() if self.profile.extended else r.u16()
+            self.header_size = r.pos
+            if self.count > (len(self.data) - self.header_size) // 4:
                 raise FormatError('Truncated SPR address table')
             self.validated = set()
         except Exception:
@@ -279,15 +328,28 @@ class Spr:
             self.data.close()
         self.file.close()
 
+    def validate_all(self):
+        ranges = set()
+        for sid in range(1, self.count + 1):
+            blob = self.blob(sid)
+            if blob:
+                offset = struct.unpack_from('<I', self.data, self.header_size + (sid - 1) * 4)[0]
+                ranges.add((offset, offset + len(blob)))
+        previous_end = 0
+        for start, end in sorted(ranges):
+            if start < previous_end:
+                raise FormatError('Overlapping SPR blocks')
+            previous_end = end
+
     def blob(self, sid):
         if sid == 0:
             return b''
         if sid < 0 or sid > self.count:
             raise FormatError(f'{self.path}: sprite {sid} outside 1..{self.count}')
-        offset = struct.unpack_from('<I', self.data, 8 + (sid - 1) * 4)[0]
+        offset = struct.unpack_from('<I', self.data, self.header_size + (sid - 1) * 4)[0]
         if offset == 0:
             return b''
-        if offset < 8 + self.count * 4 or offset + 5 > len(self.data):
+        if offset < self.header_size + self.count * 4 or offset + 5 > len(self.data):
             raise FormatError(f'Invalid SPR offset for {sid}')
         size = struct.unpack_from('<H', self.data, offset + 3)[0]
         if offset + 5 + size > len(self.data):
@@ -298,25 +360,52 @@ class Spr:
             while r.pos < len(r.data):
                 transparent, colored = r.u16(), r.u16()
                 pixels += transparent + colored
-                if pixels > 1024 or transparent + colored == 0:
-                    raise FormatError(f'Invalid RGBA sprite run for {sid}')
-                r.take(colored * 4)
+                if pixels > self.profile.size ** 2 or transparent + colored == 0:
+                    raise FormatError(f'Invalid RGBA/RGB sprite run for {sid}')
+                r.take(colored * self.profile.color_bytes)
             self.validated.add(sid)
         return blob
 
 
-def check_profile(directory):
+def read_profile(directory):
     path = Path(directory) / 'Tibia.otfi'
     if not path.exists():
-        raise FormatError(f'Missing {path}; explicit extended RGBA 10.98 profile required')
+        raise FormatError(f'Missing {path}; explicit asset profile required')
     values = {}
     for line in path.read_text(encoding='utf-8-sig').splitlines():
         if ':' in line:
             key, value = line.strip().split(':', 1)
+            if key in values:
+                raise FormatError(f'Duplicate OTFI key {key}')
             values[key] = value.strip()
-    expected = {'extended': 'true', 'transparency': 'true', 'frame-durations': 'true',
-                'frame-groups': 'true', 'sprite-size': '32', 'sprite-data-size': '4096',
-                'metadata-file': 'Tibia.dat', 'sprites-file': 'Tibia.spr'}
-    if any(values.get(k) != v for k, v in expected.items()):
-        raise FormatError(f'Unsupported OTFI profile in {path}: expected {expected}')
+    def boolean(key):
+        if values.get(key) not in ('true', 'false'):
+            raise FormatError(f'OTFI {key} must be explicitly true/false')
+        return values[key] == 'true'
+    version = int(values.get('client-version', '1098'))
+    size = int(values.get('sprite-size', '32'))
+    if not (860 <= version <= 986 or 1010 <= version <= 1098) or size not in (32, 64, 128):
+        raise FormatError(f'Unsupported client version/sprite size in {path}')
+    profile = Profile(version, boolean('extended'), boolean('transparency'),
+                      boolean('frame-durations'), boolean('frame-groups'), size)
+    if profile.version < 1010 and (profile.durations or profile.groups):
+        raise FormatError('Legacy DAT cannot declare enhanced animations/frame groups')
+    if values.get('metadata-file') != 'Tibia.dat' or values.get('sprites-file') != 'Tibia.spr':
+        raise FormatError('Only explicit Tibia.dat/Tibia.spr filenames are supported')
+    if int(values.get('sprite-data-size', '0')) != size * size * 4:
+        raise FormatError('sprite-data-size must describe the decoded RGBA buffer')
+    return profile
+
+
+def check_profile(directory):
+    read_profile(directory)
+    path = Path(directory) / 'Tibia.otfi'
     return path
+
+
+def empty_record(category, profile):
+    raw = b'\xff'
+    if category == 'outfits' and profile.groups:
+        raw += b'\x01\x00'
+    raw += b'\x01' * 7 + b'\0' * profile.index_bytes
+    return Record(raw, (len(raw) - profile.index_bytes,), profile.index_bytes)

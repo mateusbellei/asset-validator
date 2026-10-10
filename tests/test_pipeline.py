@@ -94,7 +94,9 @@ class PipelineTests(unittest.TestCase):
 
     def test_merge_preserves_client_ids_metadata_target_outfits_and_originals(self):
         before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
-        report = run(self.config, self.root / 'result', build=True)
+        self.config['conflicts'] = 'replace-reviewed'
+        run(self.config, self.root / 'plan')
+        report = run(self.config, self.root / 'result', build=True, plan=self.root / 'plan/report.json')
         self.assertEqual(report['selected']['items'], [100, 102])
         self.assertTrue(report['validation']['all_record_fingerprints_match'])
         result = Dat(self.root / 'result/Tibia.dat')

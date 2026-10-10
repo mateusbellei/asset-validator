@@ -1,0 +1,10 @@
+__pycache__/
+*.egg-info/
+.venv/
+output/
+local/
+.tools/
+*.dat
+*.spr
+*.otb
+*.otbm

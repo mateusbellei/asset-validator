@@ -4,6 +4,8 @@
   "source": "source",
   "target": "target",
   "mode": "merge",
+  "conflicts": "replace-reviewed",
+  "target_otb": "target/items.otb",
   "extra": {
     "items": [],
     "outfits": [],

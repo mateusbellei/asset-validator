@@ -8,6 +8,8 @@ Os leitores foram implementados em Python, usando somente a biblioteca padrão e
 - [TFS: IOMap](https://github.com/otland/forgottenserver/blob/master/src/iomap.cpp): itens em tiles e nós de mapa.
 - [Object Builder](https://github.com/ottools/ObjectBuilder): perfil OTFI e metadados 10.10+ com durações e grupos de animação.
 
-Layout suportado: DAT com assinatura u32 e quatro limites u16 (itens começam em 100; demais categorias em 1); flags 10.10+; Sprite IDs u32; SPR com assinatura u32, quantidade u32, tabela de offsets u32, color key de três bytes, tamanho u16 e runs RGBA. Não se concatena nem renumera diretamente o DAT. Entradas sem conteúdo no SPR são normalizadas para sprite 0 durante a reconstrução.
+Layout suportado: DAT com assinatura u32 e quatro limites u16 (itens começam em 100; demais categorias em 1); famílias de flags 8.60–9.86 e 10.10–10.98; Sprite IDs u16/u32; SPR com assinatura u32, quantidade u16/u32 conforme OTFI, tabela de offsets u32, color key de três bytes, tamanho u16 e runs RGB/RGBA. Durações e frame groups dependem dos booleans explícitos do perfil. Não se concatena nem renumera diretamente o DAT. Entradas sem conteúdo no SPR são normalizadas para sprite 0 durante a reconstrução.
 
-Limites preservados: o limite de Client ID continua u16; assinaturas DAT/SPR e OTFI de saída vêm do destino. A assinatura não comprova que duas bases têm conteúdo equivalente.
+OTBM 0 requer o OTB para interpretar o contador extra de stack no item compacto do tile. Nas versões 1–3 o ID compacto não carrega esse contador. A frequência conta objetos, não unidades dentro de stacks.
+
+Limites preservados: Client ID continua u16; assinaturas DAT/SPR e OTFI de saída vêm do destino ou da origem em builds sem destino. A assinatura não comprova equivalência de conteúdo. Merge entre perfis diferentes é recusado. O output OTB contém definições de origem selecionadas e definições preservadas do destino, quando target_otb é fornecido.

@@ -1,0 +1,8 @@
+{
+  "map": "maps/world.otbm",
+  "otb": "source/items.otb",
+  "source": "source",
+  "mode": "map-only",
+  "scan": {"paths": ["server/data", "server/src/const.h"], "constants": {}, "resolutions": {}},
+  "extra": {"items": [], "outfits": [], "effects": [], "missiles": []}
+}
